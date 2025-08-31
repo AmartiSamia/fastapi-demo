@@ -1,16 +1,18 @@
 /**
- * ScrumOps CI/CD Pipeline
- * 
- * Simplified Jenkins pipeline for automated application deployment to Azure Kubernetes Service.
- * This pipeline handles source code checkout, containerization, and deployment with minimal overhead.
- * 
- * Key Features:
- * - Automatic project type detection (Node.js, Maven, Python, Static)
- * - Dynamic Dockerfile generation for containerization
- * - Azure Container Registry integration for image storage
- * - Azure Kubernetes Service deployment with ingress configuration
- * - Simplified configuration with essential parameters only
+ * ScrumOps CI/CD Pipeline (AKS + ACR)
+ * Purpose: build → containerize → push → deploy with Ingress.
+ *
+ * Stages: Validate → Checkout → Detect Type → Dockerfile → Build App
+ *         → Build Image → Push to ACR → Deploy to AKS → Verify → Post.
+ *
+ * Params: GITHUB_URL, PROJECT_NAME, IMAGE_NAME (optional), BRANCH (default: main).
+ * Env:    ACR_SERVER (registry), IMAGE_TAG = ${BUILD_NUMBER}.
+ * Creds:  acr-credentials (ACR push), kubeconfig-dev (AKS kubeconfig).
+ *
+ * Agent needs Docker; Maven/Node if used by the project.
+ * kubectl is auto-installed if missing.
  */
+
 pipeline {
   agent any
 
@@ -414,16 +416,11 @@ spec:
               fi
               
               # Wait for ingress to be ready and get URL
-              for i in {1..20}; do
-                INGRESS_HOST=$($KUBECTL_CMD get ingress ${PROJECT_NAME}-ingress -n ${NAMESPACE} -o jsonpath='{.spec.rules[0].host}' 2>/dev/null || echo "")
-                if [ -n "$INGRESS_HOST" ] && [ "$INGRESS_HOST" != "null" ]; then
-                  LIVE_URL="http://$INGRESS_HOST"
-                  echo "✅ Application successfully deployed and accessible at: $LIVE_URL"
-                  break
-                fi
-                echo "Waiting for ingress configuration (${i}/20)..."
-                sleep 10
-              done
+                $KUBECTL_CMD wait --for=condition=available ingress/${PROJECT_NAME}-ingress -n ${NAMESPACE} --timeout=200s
+                INGRESS_HOST=$($KUBECTL_CMD get ingress ${PROJECT_NAME}-ingress -n ${NAMESPACE} -o jsonpath='{.spec.rules[0].host}')
+                LIVE_URL="http://$INGRESS_HOST"
+                echo "Application successfully deployed and accessible at: $LIVE_URL"
+
               
               # Display deployment status
               echo "=== Deployment Summary ==="
@@ -453,36 +450,7 @@ spec:
     
     failure {
       echo " Deployment failed. Check the logs above for details."
-      withCredentials([file(credentialsId: 'kubeconfig-dev', variable: 'KUBECONFIG_FILE')]) {
-        sh '''
-          # Ensure kubectl is available for troubleshooting
-          if ! command -v kubectl >/dev/null 2>&1 && [ ! -x "./kubectl" ]; then
-            echo "Installing kubectl for troubleshooting..."
-            curl -LO "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl" || true
-            chmod +x kubectl || true
-          fi
-          
-          export KUBECONFIG="${KUBECONFIG_FILE}"
-          export PATH="$PWD:$PATH"
-          echo "=== Troubleshooting Information ==="
-          
-          # Use kubectl or local kubectl
-          KUBECTL_CMD="kubectl"
-          if ! command -v kubectl >/dev/null 2>&1 && [ -x "./kubectl" ]; then
-            KUBECTL_CMD="./kubectl"
-          fi
-          
-          # Only run kubectl commands if kubectl is available
-          if command -v $KUBECTL_CMD >/dev/null 2>&1 || [ -x "./$KUBECTL_CMD" ]; then
-            $KUBECTL_CMD -n "${NAMESPACE}" describe deployment "${PROJECT_NAME}" || true
-            $KUBECTL_CMD -n "${NAMESPACE}" get pods -o wide || true
-            $KUBECTL_CMD -n "${NAMESPACE}" get events --sort-by=.lastTimestamp | tail -20 || true
-          else
-            echo "kubectl not available for troubleshooting"
-            echo "Please check Jenkins server configuration and ensure kubectl is installed"
-          fi
-        '''
-      }
+       echo "Logs: ${env.BUILD_URL}console"
     }
   }
 }
